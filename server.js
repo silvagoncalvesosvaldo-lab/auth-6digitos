@@ -72,6 +72,50 @@ app.get('/debug/env', (_req, res) => {
   });
 });
 
+// Página simples para testes rápidos
+app.get('/debug/form', (_req, res) => {
+  res.type('html').send(`
+    <h1>Debug — Auth 6 dígitos</h1>
+    <p>
+      <a href="/health" target="_blank">/health</a> |
+      <a href="/debug/env" target="_blank">/debug/env</a>
+    </p>
+
+    <h2>Testes (mock)</h2>
+    <form action="/admin/login" method="post">
+      <h3>/admin/login</h3>
+      <input name="email" placeholder="email" required />
+      <input name="password" placeholder="senha" required />
+      <button>Login</button>
+    </form>
+
+    <form action="/admin/verify-2fa" method="post" style="margin-top:16px">
+      <h3>/admin/verify-2fa</h3>
+      <input name="email" placeholder="email" required />
+      <input name="code" placeholder="código 6 dígitos" required />
+      <button>Verificar</button>
+    </form>
+
+    <script>
+      for (const f of document.querySelectorAll('form')) {
+        f.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const body = Object.fromEntries(new FormData(f).entries());
+          const r = await fetch(f.action, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+          });
+          const text = await r.text();
+          let j;
+          try { j = JSON.parse(text); } catch { j = { status: r.status, raw: text }; }
+          alert(JSON.stringify(j, null, 2));
+        });
+      }
+    </script>
+  `);
+});
+
 // 404
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -89,5 +133,5 @@ app.use((err, _req, res, _next) => {
 
 // ================= Start =================
 app.listen(PORT, () => {
-  console.log(`Auth 6 dígitos ON : http://localhost:${PORT}`);
+  console.log(\`Auth 6 dígitos ON : http://localhost:\${PORT}\`);
 });
