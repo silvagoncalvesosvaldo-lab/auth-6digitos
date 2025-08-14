@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Variáveis
+// ================= Env =================
 const {
   PORT = 10000,
   DEV_MODE = 'false',
@@ -19,7 +19,7 @@ const {
   APPWRITE_2FA_COLLECTION_ID,
 } = process.env;
 
-// Appwrite (opcional: só conecta se tiver env)
+// ================= Appwrite (opcional) =================
 let appwriteDB = null;
 try {
   if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY) {
@@ -37,12 +37,12 @@ try {
   console.error('[ERRO] Falha ao inicializar Appwrite:', err);
 }
 
-// Raiz
+// ================= Rotas =================
 app.get('/', (_req, res) => {
   res.send('Auth 6 dígitos ✅');
 });
 
-// Health check (usado pelo Render)
+// Health check (Render usa para monitorar)
 app.get('/health', (_req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -52,7 +52,7 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Debug de ambiente (só com DEV_MODE=true)
+// Debug de ambiente (somente em DEV_MODE=true)
 app.get('/debug/env', (_req, res) => {
   if (String(DEV_MODE).toLowerCase() !== 'true') {
     return res.status(403).json({ ok: false, error: 'DEV_MODE must be true' });
@@ -78,13 +78,16 @@ app.use((_req, res) => {
 });
 
 // 500
+// eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res
-    .status(500)
-    .json({ error: 'internal', message: String(DEV_MODE).toLowerCase() === 'true' ? String(err) : undefined });
+  res.status(500).json({
+    error: 'internal',
+    message: String(DEV_MODE).toLowerCase() === 'true' ? String(err) : undefined,
+  });
 });
 
-// Start
+// ================= Start =================
 app.listen(PORT, () => {
   console.log(`Auth 6 dígitos ON : http://localhost:${PORT}`);
+});
