@@ -133,5 +133,5 @@ app.use((err, _req, res, _next) => {
 
 // ================= Start =================
 app.listen(PORT, () => {
-  console.log(\`Auth 6 dígitos ON : http://localhost:\${PORT}\`);
+  console.log('Auth 6 dígitos ON : http://localhost:' + PORT);
 });
