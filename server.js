@@ -16,12 +16,12 @@ const {
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
   APPWRITE_DB_ID,
-  APPWRITE_LOGIN_CODES_COLLECTION_ID, // <- coleção p/ códigos
-  JWT_SECRET = 'dev-secret',          // <- em produção, troque por um segredo forte
-  CODE_TTL_MINUTES = '10'             // validade do código (minutos)
+  APPWRITE_LOGIN_CODES_COLLECTION_ID, // ID da collection login_codes
+  JWT_SECRET = 'dev-secret',
+  CODE_TTL_MINUTES = '10'
 } = process.env;
 
-// --- Appwrite ---
+// ------------ Appwrite ------------
 let db = null;
 try {
   const client = new Client()
@@ -29,17 +29,12 @@ try {
     .setProject(APPWRITE_PROJECT_ID)
     .setKey(APPWRITE_API_KEY);
   db = new Databases(client);
-  console.log('[init] Appwrite OK');
+  console.log('[init] Appwrite inicializado.');
 } catch (e) {
-  console.warn('[init] Appwrite falhou:', e.message);
+  console.warn('[init] Falha ao inicializar Appwrite:', e.message);
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-function addMinutes(date, minutes) {
-  return new Date(date.getTime() + minutes * 60000);
-}
+// ------------ Helpers ------------
 function random6() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -51,7 +46,7 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'auth-6digitos', time: new Date().toISOString() });
 });
 
-// ---------- PÁGINA DE TESTE ----------
+// ------------ Página de teste ------------
 app.get('/debug/form', (_req, res) => {
   res.type('html').send(`
   <!doctype html>
@@ -61,14 +56,13 @@ app.get('/debug/form', (_req, res) => {
     body{font-family:system-ui,Arial;padding:24px;max-width:720px;margin:auto}
     form{border:1px solid #ddd;border-radius:12px;padding:16px;margin:16px 0}
     label{display:block;margin:8px 0 4px}
-    input,select,button{padding:8px;border:1px solid #ccc;border-radius:8px;width:100%;box-sizing:border-box}
-    button{cursor:pointer}
+    input,select,button{padding:8px;border:1px solid #ccc;border-radius:8px;width:100%}
     .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .note{font-size:12px;color:#555}
     code{background:#f5f5f5;padding:2px 4px;border-radius:4px}
   </style>
-  <h1>Teste do fluxo: /auth/send-code → /auth/verify-code</h1>
-  <p class="note">Com <code>DEV_MODE=true</code>, a API retorna <code>code_dev</code> (não envia email real).</p>
+  <h1>Teste: /auth/send-code → /auth/verify-code</h1>
+  <p class="note">Com <code>DEV_MODE=true</code> a API retorna <code>code_dev</code> no envio.</p>
 
   <form id="send" action="/auth/send-code" method="post">
     <h2>1) Enviar código</h2>
@@ -76,7 +70,7 @@ app.get('/debug/form', (_req, res) => {
     <input name="email" type="email" placeholder="seu-email@exemplo.com" required />
     <div class="row">
       <div>
-        <label>Perfil (role)</label>
+        <label>Perfil</label>
         <select name="role">
           <option value="cliente">cliente</option>
           <option value="transportador">transportador</option>
@@ -85,7 +79,7 @@ app.get('/debug/form', (_req, res) => {
         </select>
       </div>
       <div>
-        <label>TTL (minutos)</label>
+        <label>TTL (min)</label>
         <input name="ttl" type="number" min="1" placeholder="${CODE_TTL_MINUTES}" />
       </div>
     </div>
@@ -96,7 +90,7 @@ app.get('/debug/form', (_req, res) => {
     <h2>2) Verificar código</h2>
     <label>Email</label>
     <input name="email" type="email" required />
-    <label>Código de 6 dígitos</label>
+    <label>Código (6 dígitos)</label>
     <input name="code" type="text" pattern="\\d{6}" placeholder="123456" required />
     <button>Verificar</button>
   </form>
@@ -105,52 +99,46 @@ app.get('/debug/form', (_req, res) => {
     async function sendJSON(form) {
       const url = form.action;
       const body = Object.fromEntries(new FormData(form).entries());
-      // converter ttl opcional para número, se preenchido
       if (body.ttl === '') delete body.ttl;
-      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+      const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
       const j = await r.json();
       alert(JSON.stringify(j, null, 2));
     }
-    document.querySelectorAll('form').forEach(f => {
-      f.addEventListener('submit', (e) => { e.preventDefault(); sendJSON(f); });
-    });
+    document.querySelectorAll('form').forEach(f => f.addEventListener('submit', e => { e.preventDefault(); sendJSON(f); }));
   </script>
   `);
 });
 
-// ---------- ROTAS AUTH ----------
+// ------------ Rotas Auth ------------
+
 /**
  * POST /auth/send-code
  * body: { email, role, ttl? }
- * - Gera código 6 dígitos
- * - Salva no Appwrite: email, role, code_hash, code (p/ DEV/diagnóstico), expires_at, used=false
- * - Em DEV_MODE: retorna { code_dev }
- * - Em produção: não retorna o código (aqui você integraria envio por email/SMS/WhatsApp)
+ * Salva: email, role, code (DEV), code_hash, used=false, expires_at (Integer/segundos)
  */
 app.post('/auth/send-code', async (req, res) => {
   const started = Date.now();
   try {
     const { email, role = 'cliente', ttl } = req.body || {};
     if (!email) return res.status(400).json({ ok:false, error:'email obrigatório' });
+    if (!db) throw new Error('Appwrite não inicializado');
 
     const code = random6();
     const code_hash = await bcrypt.hash(code, 12);
 
-    const createdAt = new Date();
     const minutes = Number.isFinite(Number(ttl)) && Number(ttl) > 0 ? Number(ttl) : Number(CODE_TTL_MINUTES);
-    const expiresAt = addMinutes(createdAt, minutes);
+    const expiresAt = new Date(Date.now() + minutes * 60 * 1000);
+    const expires_at = Math.floor(expiresAt.getTime() / 1000); // Integer (segundos)
 
     const doc = {
       email: String(email).toLowerCase().trim(),
       role,
-      code,             // ⚠️ manter por enquanto (útil em DEV e também atende coleções que exigem atributo "code")
+      code,        // mantemos para DEV/diagnóstico (em PROD você pode remover este campo)
       code_hash,
       used: false,
-      created_at: createdAt.toISOString(),
-      expires_at: expiresAt.toISOString()
+      expires_at
     };
 
-    if (!db) throw new Error('Appwrite não inicializado');
     await db.createDocument(
       APPWRITE_DB_ID,
       APPWRITE_LOGIN_CODES_COLLECTION_ID,
@@ -161,12 +149,8 @@ app.post('/auth/send-code', async (req, res) => {
     const payload = { ok: true, message: 'Código gerado' };
     if (String(DEV_MODE).toLowerCase() === 'true') {
       payload.code_dev = code;
-      payload.observacao = 'DEV_MODE=true → o código é retornado aqui para testes';
-    } else {
-      // Produção: aqui entraria o envio real (email/SMS/WhatsApp) se necessário.
-      // Ex.: await sendEmail(email, code)
+      payload.observacao = 'DEV_MODE=true → o código é retornado para testes';
     }
-
     payload.latency_ms = Date.now() - started;
     return res.json(payload);
 
@@ -179,16 +163,13 @@ app.post('/auth/send-code', async (req, res) => {
 /**
  * POST /auth/verify-code
  * body: { email, code }
- * - Busca o último código não usado para o email
- * - Checa expiração e compara hash
- * - Marca como usado; retorna um token de sessão (JWT) e role
+ * Busca último código não usado do email; confere expiração e hash; marca usado; retorna JWT.
  */
 app.post('/auth/verify-code', async (req, res) => {
   const started = Date.now();
   try {
     const { email, code } = req.body || {};
     if (!email || !code) return res.status(400).json({ ok:false, error:'email e code são obrigatórios' });
-
     if (!db) throw new Error('Appwrite não inicializado');
 
     const q = await db.listDocuments(
@@ -205,17 +186,14 @@ app.post('/auth/verify-code', async (req, res) => {
     const doc = q.documents?.[0];
     if (!doc) return res.status(400).json({ ok:false, error:'Código não encontrado ou já utilizado' });
 
-    // expiração
-    const now = new Date();
-    if (doc.expires_at && new Date(doc.expires_at) < now) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (typeof doc.expires_at === 'number' && doc.expires_at < nowSec) {
       return res.status(400).json({ ok:false, error:'Código expirado' });
     }
 
-    // comparação
     const ok = await bcrypt.compare(String(code), doc.code_hash);
     if (!ok) return res.status(400).json({ ok:false, error:'Código inválido' });
 
-    // marca como usado
     await db.updateDocument(
       APPWRITE_DB_ID,
       APPWRITE_LOGIN_CODES_COLLECTION_ID,
@@ -225,7 +203,7 @@ app.post('/auth/verify-code', async (req, res) => {
 
     const token = jwtFor(doc.email, doc.role || 'cliente');
     const payload = { ok:true, email: doc.email, role: doc.role || 'cliente', token, latency_ms: Date.now() - started };
-    if (String(DEV_MODE).toLowerCase() === 'true') payload.note = 'Token gerado em DEV. Em produção, configure um JWT_SECRET forte.';
+    if (String(DEV_MODE).toLowerCase() === 'true') payload.note = 'JWT gerado em DEV.';
     return res.json(payload);
 
   } catch (err) {
