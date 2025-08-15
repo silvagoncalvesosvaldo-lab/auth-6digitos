@@ -1,137 +1,240 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { Client, Databases } = require('node-appwrite');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { Client, Databases, ID, Query } = require('node-appwrite');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ================= Env =================
 const {
-  PORT = 10000,
-  DEV_MODE = 'false',
+  PORT = 3000,
+  DEV_MODE = 'true',
   APPWRITE_ENDPOINT,
   APPWRITE_PROJECT_ID,
   APPWRITE_API_KEY,
   APPWRITE_DB_ID,
-  APPWRITE_2FA_COLLECTION_ID,
+  APPWRITE_LOGIN_CODES_COLLECTION_ID, // <- coleção p/ códigos
+  JWT_SECRET = 'dev-secret',          // <- em produção, troque por um segredo forte
+  CODE_TTL_MINUTES = '10'             // validade do código (minutos)
 } = process.env;
 
-// ================= Appwrite (opcional) =================
-let appwriteDB = null;
+// --- Appwrite ---
+let db = null;
 try {
-  if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY) {
-    const client = new Client()
-      .setEndpoint(APPWRITE_ENDPOINT)
-      .setProject(APPWRITE_PROJECT_ID)
-      .setKey(APPWRITE_API_KEY);
-
-    appwriteDB = new Databases(client);
-    console.log('[OK] Appwrite conectado');
-  } else {
-    console.warn('[WARN] Variáveis do Appwrite ausentes. Use /debug/env para conferir.');
-  }
-} catch (err) {
-  console.error('[ERRO] Falha ao inicializar Appwrite:', err);
+  const client = new Client()
+    .setEndpoint(APPWRITE_ENDPOINT)
+    .setProject(APPWRITE_PROJECT_ID)
+    .setKey(APPWRITE_API_KEY);
+  db = new Databases(client);
+  console.log('[init] Appwrite OK');
+} catch (e) {
+  console.warn('[init] Appwrite falhou:', e.message);
 }
 
-// ================= Rotas =================
-app.get('/', (_req, res) => {
-  res.send('Auth 6 dígitos ✅');
-});
+function nowIso() {
+  return new Date().toISOString();
+}
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60000);
+}
+function random6() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+function jwtFor(email, role) {
+  return jwt.sign({ sub: email, role }, JWT_SECRET, { expiresIn: '2h' });
+}
 
-// Health check (Render usa para monitorar)
 app.get('/health', (_req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    service: 'auth-6digitos',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ ok: true, service: 'auth-6digitos', time: new Date().toISOString() });
 });
 
-// Debug de ambiente (somente em DEV_MODE=true)
-app.get('/debug/env', (_req, res) => {
-  if (String(DEV_MODE).toLowerCase() !== 'true') {
-    return res.status(403).json({ ok: false, error: 'DEV_MODE must be true' });
-  }
-  res.json({
-    ok: true,
-    node: process.version,
-    env: {
-      PORT,
-      DEV_MODE,
-      APPWRITE_ENDPOINT,
-      APPWRITE_PROJECT_ID,
-      APPWRITE_DB_ID,
-      APPWRITE_2FA_COLLECTION_ID,
-      APPWRITE_API_KEY: '***hidden***',
-    },
-  });
-});
-
-// Página simples para testes rápidos
+// ---------- PÁGINA DE TESTE ----------
 app.get('/debug/form', (_req, res) => {
   res.type('html').send(`
-    <h1>Debug — Auth 6 dígitos</h1>
-    <p>
-      <a href="/health" target="_blank">/health</a> |
-      <a href="/debug/env" target="_blank">/debug/env</a>
-    </p>
+  <!doctype html>
+  <meta charset="utf-8"/>
+  <title>Debug 6 dígitos</title>
+  <style>
+    body{font-family:system-ui,Arial;padding:24px;max-width:720px;margin:auto}
+    form{border:1px solid #ddd;border-radius:12px;padding:16px;margin:16px 0}
+    label{display:block;margin:8px 0 4px}
+    input,select,button{padding:8px;border:1px solid #ccc;border-radius:8px;width:100%;box-sizing:border-box}
+    button{cursor:pointer}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .note{font-size:12px;color:#555}
+    code{background:#f5f5f5;padding:2px 4px;border-radius:4px}
+  </style>
+  <h1>Teste do fluxo: /auth/send-code → /auth/verify-code</h1>
+  <p class="note">Com <code>DEV_MODE=true</code>, a API retorna <code>code_dev</code> (não envia email real).</p>
 
-    <h2>Testes (mock)</h2>
-    <form action="/admin/login" method="post">
-      <h3>/admin/login</h3>
-      <input name="email" placeholder="email" required />
-      <input name="password" placeholder="senha" required />
-      <button>Login</button>
-    </form>
+  <form id="send" action="/auth/send-code" method="post">
+    <h2>1) Enviar código</h2>
+    <label>Email</label>
+    <input name="email" type="email" placeholder="seu-email@exemplo.com" required />
+    <div class="row">
+      <div>
+        <label>Perfil (role)</label>
+        <select name="role">
+          <option value="cliente">cliente</option>
+          <option value="transportador">transportador</option>
+          <option value="afiliado">afiliado</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      <div>
+        <label>TTL (minutos)</label>
+        <input name="ttl" type="number" min="1" placeholder="${CODE_TTL_MINUTES}" />
+      </div>
+    </div>
+    <button>Enviar código</button>
+  </form>
 
-    <form action="/admin/verify-2fa" method="post" style="margin-top:16px">
-      <h3>/admin/verify-2fa</h3>
-      <input name="email" placeholder="email" required />
-      <input name="code" placeholder="código 6 dígitos" required />
-      <button>Verificar</button>
-    </form>
+  <form id="verify" action="/auth/verify-code" method="post">
+    <h2>2) Verificar código</h2>
+    <label>Email</label>
+    <input name="email" type="email" required />
+    <label>Código de 6 dígitos</label>
+    <input name="code" type="text" pattern="\\d{6}" placeholder="123456" required />
+    <button>Verificar</button>
+  </form>
 
-    <script>
-      for (const f of document.querySelectorAll('form')) {
-        f.addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const body = Object.fromEntries(new FormData(f).entries());
-          const r = await fetch(f.action, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body)
-          });
-          const text = await r.text();
-          let j;
-          try { j = JSON.parse(text); } catch { j = { status: r.status, raw: text }; }
-          alert(JSON.stringify(j, null, 2));
-        });
-      }
-    </script>
+  <script>
+    async function sendJSON(form) {
+      const url = form.action;
+      const body = Object.fromEntries(new FormData(form).entries());
+      // converter ttl opcional para número, se preenchido
+      if (body.ttl === '') delete body.ttl;
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json();
+      alert(JSON.stringify(j, null, 2));
+    }
+    document.querySelectorAll('form').forEach(f => {
+      f.addEventListener('submit', (e) => { e.preventDefault(); sendJSON(f); });
+    });
+  </script>
   `);
 });
 
-// 404
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Not found' });
+// ---------- ROTAS AUTH ----------
+/**
+ * POST /auth/send-code
+ * body: { email, role, ttl? }
+ * - Gera código 6 dígitos
+ * - Salva no Appwrite: email, role, code_hash, code (p/ DEV/diagnóstico), expires_at, used=false
+ * - Em DEV_MODE: retorna { code_dev }
+ * - Em produção: não retorna o código (aqui você integraria envio por email/SMS/WhatsApp)
+ */
+app.post('/auth/send-code', async (req, res) => {
+  const started = Date.now();
+  try {
+    const { email, role = 'cliente', ttl } = req.body || {};
+    if (!email) return res.status(400).json({ ok:false, error:'email obrigatório' });
+
+    const code = random6();
+    const code_hash = await bcrypt.hash(code, 12);
+
+    const createdAt = new Date();
+    const minutes = Number.isFinite(Number(ttl)) && Number(ttl) > 0 ? Number(ttl) : Number(CODE_TTL_MINUTES);
+    const expiresAt = addMinutes(createdAt, minutes);
+
+    const doc = {
+      email: String(email).toLowerCase().trim(),
+      role,
+      code,             // ⚠️ manter por enquanto (útil em DEV e também atende coleções que exigem atributo "code")
+      code_hash,
+      used: false,
+      created_at: createdAt.toISOString(),
+      expires_at: expiresAt.toISOString()
+    };
+
+    if (!db) throw new Error('Appwrite não inicializado');
+    await db.createDocument(
+      APPWRITE_DB_ID,
+      APPWRITE_LOGIN_CODES_COLLECTION_ID,
+      ID.unique(),
+      doc
+    );
+
+    const payload = { ok: true, message: 'Código gerado' };
+    if (String(DEV_MODE).toLowerCase() === 'true') {
+      payload.code_dev = code;
+      payload.observacao = 'DEV_MODE=true → o código é retornado aqui para testes';
+    } else {
+      // Produção: aqui entraria o envio real (email/SMS/WhatsApp) se necessário.
+      // Ex.: await sendEmail(email, code)
+    }
+
+    payload.latency_ms = Date.now() - started;
+    return res.json(payload);
+
+  } catch (err) {
+    console.error('[send-code] erro:', err);
+    return res.status(500).json({ ok:false, error: err.message, where:'send-code' });
+  }
 });
 
-// 500
-// eslint-disable-next-line no-unused-vars
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(500).json({
-    error: 'internal',
-    message: String(DEV_MODE).toLowerCase() === 'true' ? String(err) : undefined,
-  });
+/**
+ * POST /auth/verify-code
+ * body: { email, code }
+ * - Busca o último código não usado para o email
+ * - Checa expiração e compara hash
+ * - Marca como usado; retorna um token de sessão (JWT) e role
+ */
+app.post('/auth/verify-code', async (req, res) => {
+  const started = Date.now();
+  try {
+    const { email, code } = req.body || {};
+    if (!email || !code) return res.status(400).json({ ok:false, error:'email e code são obrigatórios' });
+
+    if (!db) throw new Error('Appwrite não inicializado');
+
+    const q = await db.listDocuments(
+      APPWRITE_DB_ID,
+      APPWRITE_LOGIN_CODES_COLLECTION_ID,
+      [
+        Query.equal('email', String(email).toLowerCase().trim()),
+        Query.equal('used', false),
+        Query.orderDesc('$createdAt'),
+        Query.limit(1)
+      ]
+    );
+
+    const doc = q.documents?.[0];
+    if (!doc) return res.status(400).json({ ok:false, error:'Código não encontrado ou já utilizado' });
+
+    // expiração
+    const now = new Date();
+    if (doc.expires_at && new Date(doc.expires_at) < now) {
+      return res.status(400).json({ ok:false, error:'Código expirado' });
+    }
+
+    // comparação
+    const ok = await bcrypt.compare(String(code), doc.code_hash);
+    if (!ok) return res.status(400).json({ ok:false, error:'Código inválido' });
+
+    // marca como usado
+    await db.updateDocument(
+      APPWRITE_DB_ID,
+      APPWRITE_LOGIN_CODES_COLLECTION_ID,
+      doc.$id,
+      { used: true }
+    );
+
+    const token = jwtFor(doc.email, doc.role || 'cliente');
+    const payload = { ok:true, email: doc.email, role: doc.role || 'cliente', token, latency_ms: Date.now() - started };
+    if (String(DEV_MODE).toLowerCase() === 'true') payload.note = 'Token gerado em DEV. Em produção, configure um JWT_SECRET forte.';
+    return res.json(payload);
+
+  } catch (err) {
+    console.error('[verify-code] erro:', err);
+    return res.status(500).json({ ok:false, error: err.message, where:'verify-code' });
+  }
 });
 
-// ================= Start =================
-app.listen(PORT, () => {
-  console.log('Auth 6 dígitos ON : http://localhost:' + PORT);
+const listenPort = Number(PORT) || 3000;
+app.listen(listenPort, () => {
+  console.log(`[init] auth-6digitos rodando em :${listenPort}`);
 });
